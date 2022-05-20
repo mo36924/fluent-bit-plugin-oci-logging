@@ -4,7 +4,7 @@ import (
 	"C"
 	"context"
 	"encoding/json"
-	"fmt"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -13,17 +13,14 @@ import (
 	"github.com/fluent/fluent-bit-go/output"
 	"github.com/google/uuid"
 	"github.com/oracle/oci-go-sdk/v65/common"
+	"github.com/oracle/oci-go-sdk/v65/common/auth"
 	"github.com/oracle/oci-go-sdk/v65/loggingingestion"
 )
 
-type Config struct {
+type Plugin struct {
 	LogId    string
 	Hostname string
-}
-
-type Plugin struct {
-	Config Config
-	Client loggingingestion.LoggingClient
+	Client   loggingingestion.LoggingClient
 }
 
 var (
@@ -39,28 +36,29 @@ func FLBPluginRegister(ctx unsafe.Pointer) int {
 func FLBPluginInit(ctx unsafe.Pointer) int {
 	hostname, err := os.Hostname()
 	if err != nil {
-		fmt.Printf("%v\n", err)
+		log.Printf("%v\n", err)
 		return output.FLB_ERROR
 	}
-	config := Config{
-		LogId:    output.FLBPluginConfigKey(ctx, "log_id"),
-		Hostname: hostname,
-	}
-	if len(config.LogId) == 0 {
-		fmt.Println("The log_id is a required value.")
+	logId := output.FLBPluginConfigKey(ctx, "log_id")
+	if len(logId) == 0 {
+		log.Println("The log_id is a required value.")
 		return output.FLB_ERROR
 	}
-
-	client, err := loggingingestion.NewLoggingClientWithConfigurationProvider(common.DefaultConfigProvider())
+	provider, err := auth.InstancePrincipalConfigurationProvider()
 	if err != nil {
-		fmt.Printf("%v\n", err)
+		log.Printf("%v\n", err)
 		return output.FLB_ERROR
 	}
-
+	client, err := loggingingestion.NewLoggingClientWithConfigurationProvider(provider)
+	if err != nil {
+		log.Printf("%v\n", err)
+		return output.FLB_ERROR
+	}
 	output.FLBPluginSetContext(ctx, len(plugins))
 	plugins = append(plugins, &Plugin{
-		Config: config,
-		Client: client,
+		LogId:    logId,
+		Hostname: hostname,
+		Client:   client,
 	})
 	return output.FLB_OK
 }
@@ -104,7 +102,7 @@ func FLBPluginFlushCtx(ctx, data unsafe.Pointer, length C.int, tag *C.char) int 
 		flatten("", record, outputRecord)
 		data, err := json.Marshal(outputRecord)
 		if err != nil {
-			fmt.Printf("%v\n", err)
+			log.Printf("%v\n", err)
 			continue
 		}
 		var sourceIdentifier string
@@ -122,12 +120,12 @@ func FLBPluginFlushCtx(ctx, data unsafe.Pointer, length C.int, tag *C.char) int 
 			})
 		} else {
 			logEntryBatchMap[requestkey] = loggingingestion.LogEntryBatch{
-				Source:              common.String(plugin.Config.Hostname),
+				Source:              common.String(plugin.Hostname),
 				Subject:             common.String(sourceIdentifier),
 				Type:                common.String("com.oraclecloud.logging.custom." + tagpath),
 				Defaultlogentrytime: &common.SDKTime{Time: timestamp},
 				Entries: []loggingingestion.LogEntry{
-					loggingingestion.LogEntry{
+					{
 						Data: common.String(string(data)),
 						Id:   common.String(uuid.NewString()),
 						Time: &common.SDKTime{Time: timestamp},
@@ -140,15 +138,15 @@ func FLBPluginFlushCtx(ctx, data unsafe.Pointer, length C.int, tag *C.char) int 
 		logEntryBatches = append(logEntryBatches, v)
 	}
 	_, err := plugin.Client.PutLogs(context.Background(), loggingingestion.PutLogsRequest{
-		LogId: common.String(plugin.Config.LogId),
+		LogId: common.String(plugin.LogId),
 		PutLogsDetails: loggingingestion.PutLogsDetails{
 			LogEntryBatches: logEntryBatches,
 			Specversion:     common.String("1.0"),
 		},
 	})
 	if err != nil {
-		fmt.Printf("%v\n", err)
-		return output.FLB_RETRY
+		log.Printf("%v\n", err)
+		return output.FLB_ERROR
 	}
 	return output.FLB_OK
 }
